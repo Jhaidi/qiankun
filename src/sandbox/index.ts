@@ -3,8 +3,8 @@
  * @since 2019-04-11
  */
 import { Freer, Rebuilder, SandBox } from '../interfaces';
-import { patchAtBootstrapping, patchAtMounting } from './patchers';
 import LegacySandbox from './legacy/sandbox';
+import { patchAtBootstrapping, patchAtMounting } from './patchers';
 import ProxySandbox from './proxySandbox';
 import SnapshotSandbox from './snapshotSandbox';
 
@@ -24,7 +24,7 @@ import SnapshotSandbox from './snapshotSandbox';
  * @param elementGetter
  * @param singular
  */
-export function genSandbox(appName: string, elementGetter: () => HTMLElement | ShadowRoot, singular: boolean) {
+export function createSandbox(appName: string, elementGetter: () => HTMLElement | ShadowRoot, singular: boolean) {
   // mounting freers are one-off and should be re-init at every mounting time
   let mountingFreers: Freer[] = [];
 
@@ -38,10 +38,10 @@ export function genSandbox(appName: string, elementGetter: () => HTMLElement | S
   }
 
   // some side effect could be be invoked while bootstrapping, such as dynamic stylesheet injection with style-loader, especially during the development phase
-  const bootstrappingFreers = patchAtBootstrapping(appName, elementGetter, sandbox.proxy);
+  const bootstrappingFreers = patchAtBootstrapping(appName, elementGetter, sandbox.proxy, singular);
 
   return {
-    sandbox: sandbox.proxy,
+    proxy: sandbox.proxy,
 
     /**
      * 沙箱被 mount
@@ -64,7 +64,7 @@ export function genSandbox(appName: string, elementGetter: () => HTMLElement | S
 
       /* ------------------------------------------ 2. 开启全局变量补丁 ------------------------------------------*/
       // render 沙箱启动时开始劫持各类全局监听，尽量不要在应用初始化阶段有 事件监听/定时器 等副作用
-      mountingFreers = patchAtMounting(appName, elementGetter, sandbox.proxy);
+      mountingFreers = patchAtMounting(appName, elementGetter, sandbox.proxy, singular);
 
       /* ------------------------------------------ 3. 重置一些初始化时的副作用 ------------------------------------------*/
       // 存在 rebuilder 则表明有些副作用需要重建

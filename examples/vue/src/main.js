@@ -14,7 +14,8 @@ Vue.use(ElementUI);
 let router = null;
 let instance = null;
 
-function render() {
+function render(props = {}) {
+  const { container } = props;
   router = new VueRouter({
     base: window.__POWERED_BY_QIANKUN__ ? '/vue' : '/',
     mode: 'history',
@@ -25,11 +26,26 @@ function render() {
     router,
     store,
     render: h => h(App),
-  }).$mount('#app');
+  }).$mount(container ? container.querySelector('#app') : '#app');
 }
 
 if (!window.__POWERED_BY_QIANKUN__) {
   render();
+}
+
+function storeTest(props) {
+  props.onGlobalStateChange &&
+    props.onGlobalStateChange(
+      (value, prev) => console.log(`[onGlobalStateChange - ${props.name}]:`, value, prev),
+      true,
+    );
+  props.setGlobalState &&
+    props.setGlobalState({
+      ignore: props.name,
+      user: {
+        name: props.name,
+      },
+    });
 }
 
 export async function bootstrap() {
@@ -38,6 +54,7 @@ export async function bootstrap() {
 
 export async function mount(props) {
   console.log('[vue] props from main framework', props);
+  storeTest(props);
   render(props);
 }
 

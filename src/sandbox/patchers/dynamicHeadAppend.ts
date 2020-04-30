@@ -7,8 +7,10 @@ import { isFunction } from 'lodash';
 import { checkActivityFunctions } from 'single-spa';
 import { frameworkConfiguration } from '../../apis';
 import { Freer } from '../../interfaces';
+import { getTargetValue, setProxyPropertyGetter } from '../common';
 
-const styledComponentSymbol = Symbol('styled-component');
+const styledComponentSymbol = 'Symbol(styled-component-qiankun)';
+const attachProxySymbol = 'Symbol(attach-proxy-qiankun)';
 
 declare global {
   interface HTMLStyleElement {
@@ -18,6 +20,7 @@ declare global {
 }
 
 const rawHeadAppendChild = HTMLHeadElement.prototype.appendChild;
+const rawHeadInsertBefore = HTMLHeadElement.prototype.insertBefore;
 const rawHeadRemoveChild = HTMLHeadElement.prototype.removeChild;
 const rawAppendChild = HTMLElement.prototype.appendChild;
 const rawRemoveChild = HTMLElement.prototype.removeChild;
@@ -44,30 +47,38 @@ function setCachedRules(element: HTMLStyleElement, cssRules: CSSRuleList) {
   Object.defineProperty(element, styledComponentSymbol, { value: cssRules, configurable: true, enumerable: false });
 }
 
-/**
- * Just hijack dynamic head append, that could avoid accidentally hijacking the insertion of elements except in head.
- * Such a case: ReactDOM.createPortal(<style>.test{color:blue}</style>, container),
- * this could made we append the style element into app wrapper but it will cause an error while the react portal unmounting, as ReactDOM could not find the style in body children list.
- * @param appName
- * @param appWrapperGetter
- * @param proxy
- * @param mounting
- */
-export default function patch(
-  appName: string,
-  appWrapperGetter: () => HTMLElement | ShadowRoot,
-  proxy: Window,
-  mounting = true,
-): Freer {
-  let dynamicStyleSheetElements: Array<HTMLLinkElement | HTMLStyleElement> = [];
-
-  HTMLHeadElement.prototype.appendChild = function appendChild<T extends Node>(this: HTMLHeadElement, newChild: T) {
+function getNewAppendChild(...args: any[]) {
+  return function appendChild<T extends Node>(this: HTMLHeadElement, newChild: T) {
     const element = newChild as any;
     if (element.tagName) {
+      // eslint-disable-next-line prefer-const
+      let [appName, appWrapperGetter, proxy, singular, dynamicStyleSheetElements] = args;
+
+      const storedContainerInfo = element[attachProxySymbol];
+      if (storedContainerInfo) {
+        // eslint-disable-next-line prefer-destructuring
+        singular = storedContainerInfo.singular;
+        // eslint-disable-next-line prefer-destructuring
+        appWrapperGetter = storedContainerInfo.appWrapperGetter;
+        // eslint-disable-next-line prefer-destructuring
+        dynamicStyleSheetElements = storedContainerInfo.dynamicStyleSheetElements;
+        // eslint-disable-next-line prefer-destructuring
+        proxy = storedContainerInfo.proxy;
+      }
+
+      // have storedContainerInfo means it invoked by a micro app
+      const invokedByMicroApp = storedContainerInfo && !singular;
+
       switch (element.tagName) {
         case LINK_TAG_NAME:
         case STYLE_TAG_NAME: {
           const stylesheetElement: HTMLLinkElement | HTMLStyleElement = newChild as any;
+
+          if (invokedByMicroApp) {
+            // eslint-disable-next-line no-shadow
+            dynamicStyleSheetElements.push(stylesheetElement);
+            return rawAppendChild.call(appWrapperGetter(), stylesheetElement) as T;
+          }
 
           // check if the currently specified application is active
           // While we switch page from qiankun app to a normal react routing page, the normal one may load stylesheet dynamically while page rendering,
@@ -87,11 +98,15 @@ export default function patch(
         }
 
         case SCRIPT_TAG_NAME: {
+          if (!invokedByMicroApp) {
+            return rawAppendChild.call(this, element) as T;
+          }
+
           const { src, text } = element as HTMLScriptElement;
 
           const { fetch } = frameworkConfiguration;
           if (src) {
-            execScripts(null, [src], proxy, { fetch }).then(
+            execScripts(null, [src], proxy, { fetch, strictGlobal: !singular }).then(
               () => {
                 // we need to invoke the onload event manually to notify the event listener that the script was completed
                 // here are the two typical ways of dynamic script loading
@@ -118,7 +133,10 @@ export default function patch(
             return rawAppendChild.call(appWrapperGetter(), dynamicScriptCommentElement) as T;
           }
 
-          execScripts(null, [`<script>${text}</script>`], proxy).then(element.onload, element.onerror);
+          execScripts(null, [`<script>${text}</script>`], proxy, { strictGlobal: !singular }).then(
+            element.onload,
+            element.onerror,
+          );
           const dynamicInlineScriptCommentElement = document.createComment('dynamic inline script replaced by qiankun');
           return rawAppendChild.call(appWrapperGetter(), dynamicInlineScriptCommentElement) as T;
         }
@@ -130,18 +148,170 @@ export default function patch(
 
     return rawHeadAppendChild.call(this, element) as T;
   };
+}
 
-  HTMLHeadElement.prototype.removeChild = function removeChild<T extends Node>(this: HTMLHeadElement, child: T) {
-    if (appWrapperGetter().contains(child)) {
-      return rawRemoveChild.call(appWrapperGetter(), child) as T;
+function getNewRemoveChild(...args: any[]) {
+  return function removeChild<T extends Node>(this: HTMLHeadElement, child: T) {
+    let [appWrapperGetter] = args;
+
+    const storedContainerInfo = (child as any)[attachProxySymbol];
+    if (storedContainerInfo) {
+      // eslint-disable-next-line prefer-destructuring
+      appWrapperGetter = storedContainerInfo.appWrapperGetter;
+    }
+
+    try {
+      // container may had been removed while app unmounting if the removeChild action was async
+      const container = appWrapperGetter();
+      if (container.contains(child)) {
+        return rawRemoveChild.call(container, child) as T;
+      }
+    } catch (e) {
+      console.warn(e);
     }
 
     return rawHeadRemoveChild.call(this, child) as T;
   };
+}
+
+function getNewInsertBefore(...args: any[]) {
+  return function insertBefore<T extends Node>(this: HTMLHeadElement, newChild: T, refChild: Node | null): T {
+    const element = newChild as any;
+    if (element.tagName) {
+      // eslint-disable-next-line prefer-const
+      let [appName, appWrapperGetter, singular, dynamicStyleSheetElements] = args;
+
+      const storedContainerInfo = element[attachProxySymbol];
+      if (storedContainerInfo) {
+        // eslint-disable-next-line prefer-destructuring
+        singular = storedContainerInfo.singular;
+        // eslint-disable-next-line prefer-destructuring
+        appWrapperGetter = storedContainerInfo.appWrapperGetter;
+        // eslint-disable-next-line prefer-destructuring
+        dynamicStyleSheetElements = storedContainerInfo.dynamicStyleSheetElements;
+      }
+
+      switch (element.tagName) {
+        case LINK_TAG_NAME:
+        case STYLE_TAG_NAME: {
+          const stylesheetElement: HTMLLinkElement | HTMLStyleElement = newChild as any;
+
+          // have storedContainerInfo means it invoked by a micro app
+          if (storedContainerInfo && !singular) {
+            // eslint-disable-next-line no-shadow
+            dynamicStyleSheetElements.push(stylesheetElement);
+            return rawAppendChild.call(appWrapperGetter(), stylesheetElement) as T;
+          }
+
+          const activated = checkActivityFunctions(window.location).some(name => name === appName);
+
+          if (activated) {
+            dynamicStyleSheetElements.push(stylesheetElement);
+
+            return rawHeadInsertBefore.call(appWrapperGetter(), stylesheetElement, refChild) as T;
+          }
+
+          return rawHeadInsertBefore.call(this, element, refChild) as T;
+        }
+        default:
+          break;
+      }
+    }
+
+    return rawHeadInsertBefore.call(this, element, refChild) as T;
+  };
+}
+
+let patchCount = 0;
+
+/**
+ * Just hijack dynamic head append, that could avoid accidentally hijacking the insertion of elements except in head.
+ * Such a case: ReactDOM.createPortal(<style>.test{color:blue}</style>, container),
+ * this could made we append the style element into app wrapper but it will cause an error while the react portal unmounting, as ReactDOM could not find the style in body children list.
+ * @param appName
+ * @param appWrapperGetter
+ * @param proxy
+ * @param mounting
+ * @param singular
+ */
+export default function patch(
+  appName: string,
+  appWrapperGetter: () => HTMLElement | ShadowRoot,
+  proxy: Window,
+  mounting = true,
+  singular = true,
+): Freer {
+  let dynamicStyleSheetElements: Array<HTMLLinkElement | HTMLStyleElement> = [];
+
+  if (!singular) {
+    setProxyPropertyGetter(proxy, 'document', () => {
+      return new Proxy(document, {
+        get(target: Document, property: PropertyKey): any {
+          if (property === 'createElement') {
+            return function createElement(tagName: string, options?: any) {
+              const element = document.createElement(tagName, options);
+
+              if (tagName?.toLowerCase() === 'style' || tagName?.toLowerCase() === 'script') {
+                Object.defineProperty(element, attachProxySymbol, {
+                  value: { appName, proxy, appWrapperGetter, dynamicStyleSheetElements },
+                  enumerable: false,
+                });
+              }
+
+              return element;
+            };
+          }
+
+          return getTargetValue(document, (<any>target)[property]);
+        },
+
+        set(target: Document, p: PropertyKey, value: any): boolean {
+          // eslint-disable-next-line no-param-reassign
+          (<any>target)[p] = value;
+          return true;
+        },
+      });
+    });
+  }
+
+  // Just overwrite it while it have not been overwrite
+  if (HTMLHeadElement.prototype.appendChild === rawHeadAppendChild) {
+    HTMLHeadElement.prototype.appendChild = getNewAppendChild(
+      appName,
+      appWrapperGetter,
+      proxy,
+      singular,
+      dynamicStyleSheetElements,
+    );
+  }
+
+  // Just overwrite it while it have not been overwrite
+  if (HTMLHeadElement.prototype.removeChild === rawHeadRemoveChild) {
+    HTMLHeadElement.prototype.removeChild = getNewRemoveChild(appWrapperGetter);
+  }
+
+  // `emotion` a css-in-js library insert a style tag use insertBefore, so we also rewrite it like appendChild
+  // see https://github.com/umijs/qiankun/issues/420
+  if (HTMLHeadElement.prototype.insertBefore === rawHeadInsertBefore) {
+    HTMLHeadElement.prototype.insertBefore = getNewInsertBefore(
+      appName,
+      appWrapperGetter,
+      singular,
+      dynamicStyleSheetElements,
+    );
+  }
+
+  patchCount++;
 
   return function free() {
-    HTMLHeadElement.prototype.appendChild = rawHeadAppendChild;
-    HTMLHeadElement.prototype.removeChild = rawHeadRemoveChild;
+    patchCount--;
+
+    // release the overwrite prototype after all the micro apps unmounted
+    if (patchCount === 0) {
+      HTMLHeadElement.prototype.appendChild = rawHeadAppendChild;
+      HTMLHeadElement.prototype.insertBefore = rawHeadInsertBefore;
+      HTMLHeadElement.prototype.removeChild = rawHeadRemoveChild;
+    }
 
     dynamicStyleSheetElements.forEach(stylesheetElement => {
       /*

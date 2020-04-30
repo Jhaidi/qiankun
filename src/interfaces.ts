@@ -3,7 +3,7 @@
  * @since 2019-05-16
  */
 import { ImportEntryOpts } from 'import-html-entry';
-import { RegisterApplicationConfig, StartOpts } from 'single-spa';
+import { RegisterApplicationConfig, StartOpts, Parcel } from 'single-spa';
 
 declare global {
   interface Window {
@@ -22,35 +22,45 @@ export type Entry =
 
 export type HTMLContentRender = (props: { appContent: string; loading: boolean }) => any;
 
-// just for manual loaded apps, in single-spa it called parcel
-export type LoadableApp<T extends object = {}> = {
+export type AppMetadata = {
   // app name
   name: string;
   // app entry
   entry: Entry;
-  // where the app mount to, mutual exclusive with the legacy custom render function
-  container: string | HTMLElement;
-  // props pass through to app
-  props?: T;
-  // legacy mode, the render function all handled by user
-  render?: HTMLContentRender;
 };
 
-// for the route-based apps
-export type RegistrableApp<T extends object = {}> = {
-  activeRule: RegisterApplicationConfig['activeWhen'];
-} & LoadableApp<T>;
+// just for manual loaded apps, in single-spa it called parcel
+export type LoadableApp<T extends object = {}> = AppMetadata & { /* props pass through to app */ props?: T } & (
+    | {
+        // legacy mode, the render function all handled by user
+        render: HTMLContentRender;
+      }
+    | {
+        // where the app mount to, mutual exclusive with the legacy custom render function
+        container: string | HTMLElement;
+      }
+  );
 
-export type Prefetch =
+// for the route-based apps
+export type RegistrableApp<T extends object = {}> = LoadableApp<T> & {
+  loader?: (loading: boolean) => void;
+  activeRule: RegisterApplicationConfig['activeWhen'];
+};
+
+export type PrefetchStrategy =
   | boolean
   | 'all'
   | string[]
-  | ((apps: LoadableApp[]) => { criticalAppNames: string[]; minorAppsName: string[] });
+  | ((apps: AppMetadata[]) => { criticalAppNames: string[]; minorAppsName: string[] });
 
 type QiankunSpecialOpts = {
-  prefetch?: Prefetch;
-  jsSandbox?: boolean;
-  cssIsolation?: boolean;
+  prefetch?: PrefetchStrategy;
+  sandbox?:
+    | boolean
+    | {
+        strictStyleIsolation?: boolean;
+        patchers?: Patcher[];
+      };
   /*
     with singular mode, any app will wait to load until other apps are unmouting
     it is useful for the scenario that only one sub app shown at one time
@@ -68,8 +78,11 @@ export type FrameworkLifeCycles<T extends object> = {
   afterUnmount?: LifeCycleFn<T> | Array<LifeCycleFn<T>>; // function after app unmount
 };
 
+export type MicroApp = Parcel;
+
 export type Rebuilder = () => void;
 export type Freer = () => Rebuilder;
+export type Patcher = () => Freer;
 
 export interface SandBox {
   /** 沙箱的名字 */
@@ -83,3 +96,11 @@ export interface SandBox {
   /** 关闭沙箱 */
   inactive(): void;
 }
+
+export type OnGlobalStateChangeCallback = (state: Record<string, any>, prevState: Record<string, any>) => void;
+
+export type MicroAppStateActions = {
+  onGlobalStateChange: (callback: OnGlobalStateChangeCallback, fireImmediately?: boolean) => void;
+  setGlobalState: (state: Record<string, any>) => boolean;
+  offGlobalStateChange: () => boolean;
+};

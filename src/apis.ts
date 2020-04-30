@@ -1,8 +1,9 @@
-import { mountRootParcel, Parcel, registerApplication, start as startSingleSpa } from 'single-spa';
-import { FrameworkConfiguration, FrameworkLifeCycles, LoadableApp, RegistrableApp } from './interfaces';
+import { noop } from 'lodash';
+import { mountRootParcel, registerApplication, start as startSingleSpa } from 'single-spa';
+import { FrameworkConfiguration, FrameworkLifeCycles, LoadableApp, MicroApp, RegistrableApp } from './interfaces';
 import { loadApp } from './loader';
-import { prefetchApps } from './prefetch';
-import { Deferred } from './utils';
+import { doPrefetchStrategy } from './prefetch';
+import { Deferred, toArray } from './utils';
 
 window.__POWERED_BY_QIANKUN__ = true;
 
@@ -22,13 +23,24 @@ export function registerMicroApps<T extends object = {}>(
   microApps = [...microApps, ...unregisteredApps];
 
   unregisteredApps.forEach(app => {
-    const { name, activeRule, props, ...appConfig } = app;
+    const { name, activeRule, loader = noop, props, ...appConfig } = app;
 
     registerApplication({
       name,
       app: async () => {
+        loader(true);
         await frameworkStartedDefer.promise;
-        return loadApp({ name, props, ...appConfig }, frameworkConfiguration, lifeCycles);
+
+        const { mount, ...otherMicroAppConfigs } = await loadApp(
+          { name, props, ...appConfig },
+          frameworkConfiguration,
+          lifeCycles,
+        );
+
+        return {
+          mount: [async () => loader(true), ...toArray(mount), async () => loader(false)],
+          ...otherMicroAppConfigs,
+        };
       },
       activeWhen: activeRule,
       customProps: props,
@@ -39,7 +51,7 @@ export function registerMicroApps<T extends object = {}>(
 export function loadMicroApp<T extends object = {}>(
   app: LoadableApp<T>,
   configuration = frameworkConfiguration,
-): Parcel {
+): MicroApp {
   const { props, ...appConfig } = app;
   return mountRootParcel(() => loadApp(appConfig, configuration), {
     domElement: document.createElement('div'),
@@ -48,25 +60,19 @@ export function loadMicroApp<T extends object = {}>(
 }
 
 export function start(opts: FrameworkConfiguration = {}) {
-  frameworkConfiguration = opts;
-  const {
-    prefetch = true,
-    jsSandbox = true,
-    singular = true,
-    urlRerouteOnly,
-    ...importEntryOpts
-  } = frameworkConfiguration;
+  frameworkConfiguration = { prefetch: true, singular: true, sandbox: true, ...opts };
+  const { prefetch, sandbox, singular, urlRerouteOnly, ...importEntryOpts } = frameworkConfiguration;
 
   if (prefetch) {
-    prefetchApps(microApps, prefetch, importEntryOpts);
+    doPrefetchStrategy(microApps, prefetch, importEntryOpts);
   }
 
-  if (jsSandbox) {
+  if (sandbox) {
     if (!window.Proxy) {
       console.warn('[qiankun] Miss window.Proxy, proxySandbox will degenerate into snapshotSandbox');
       // 快照沙箱不支持非 singular 模式
       if (!singular) {
-        console.error('[qiankun] singular is forced to be true when jsSandbox enable but proxySandbox unavailable');
+        console.error('[qiankun] singular is forced to be true when sandbox enable but proxySandbox unavailable');
         frameworkConfiguration.singular = true;
       }
     }

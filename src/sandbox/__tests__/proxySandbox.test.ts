@@ -7,6 +7,14 @@ import ProxySandbox from '../proxySandbox';
 
 beforeAll(() => {
   Object.defineProperty(window, 'mockTop', { value: window, writable: false, configurable: false, enumerable: false });
+  Object.defineProperty(window, 'mockSafariTop', {
+    get() {
+      return window;
+    },
+    set() {},
+    configurable: false,
+    enumerable: false,
+  });
 });
 
 test('iterator should be worked the same as the raw window', () => {
@@ -36,9 +44,26 @@ test('window.top & window.self & window.window should equals with sandbox', () =
   const { proxy } = new ProxySandbox('unit-test');
 
   expect((<any>proxy).mockTop).toBe(proxy);
+  expect((<any>proxy).mockSafariTop).toBe(proxy);
   expect(proxy.top).toBe(proxy);
   expect(proxy.self).toBe(proxy);
   expect(proxy.window).toBe(proxy);
+});
+
+test('eval should never be represented', () => {
+  const { proxy } = new ProxySandbox('eval-test');
+  // @ts-ignore
+  window.proxy = proxy;
+  const code =
+    ';(function(window){with(window){ var testProp = function(wrequire){ eval("window.testEval=wrequire()"); }; testProp(() => "kuitos");}})(window.proxy)';
+  // eslint-disable-next-line no-eval
+  const geval = eval;
+  geval(code);
+
+  // @ts-ignore
+  expect(proxy.testEval).toBe('kuitos');
+  // @ts-ignore
+  expect(window.testEval).toBeUndefined();
 });
 
 test('hasOwnProperty should works well', () => {

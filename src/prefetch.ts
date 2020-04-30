@@ -6,7 +6,7 @@
 import { Entry, importEntry, ImportEntryOpts } from 'import-html-entry';
 import { isFunction } from 'lodash';
 import { getMountedApps } from 'single-spa';
-import { LoadableApp, Prefetch } from './interfaces';
+import { AppMetadata, PrefetchStrategy } from './interfaces';
 
 type RequestIdleCallbackHandle = any;
 type RequestIdleCallbackOptions = {
@@ -73,7 +73,7 @@ function prefetch(entry: Entry, opts?: ImportEntryOpts): void {
   });
 }
 
-function prefetchAfterFirstMounted(apps: LoadableApp[], opts?: ImportEntryOpts): void {
+function prefetchAfterFirstMounted(apps: AppMetadata[], opts?: ImportEntryOpts): void {
   window.addEventListener('single-spa:first-mount', function listener() {
     const mountedApps = getMountedApps();
     const notMountedApps = apps.filter(app => mountedApps.indexOf(app.name) === -1);
@@ -88,7 +88,7 @@ function prefetchAfterFirstMounted(apps: LoadableApp[], opts?: ImportEntryOpts):
   });
 }
 
-function prefetchImmediately(apps: LoadableApp[], opts?: ImportEntryOpts): void {
+export function prefetchImmediately(apps: AppMetadata[], opts?: ImportEntryOpts): void {
   if (process.env.NODE_ENV === 'development') {
     console.log('[qiankun] prefetch starting for apps...', apps);
   }
@@ -96,20 +96,24 @@ function prefetchImmediately(apps: LoadableApp[], opts?: ImportEntryOpts): void 
   apps.forEach(({ entry }) => prefetch(entry, opts));
 }
 
-export function prefetchApps(apps: LoadableApp[], prefetchAction: Prefetch, importEntryOpts: ImportEntryOpts) {
-  const appsName2Apps = (names: string[]): LoadableApp[] => apps.filter(app => names.includes(app.name));
+export function doPrefetchStrategy(
+  apps: AppMetadata[],
+  prefetchStrategy: PrefetchStrategy,
+  importEntryOpts?: ImportEntryOpts,
+) {
+  const appsName2Apps = (names: string[]): AppMetadata[] => apps.filter(app => names.includes(app.name));
 
-  if (Array.isArray(prefetchAction)) {
-    prefetchAfterFirstMounted(appsName2Apps(prefetchAction as string[]), importEntryOpts);
-  } else if (isFunction(prefetchAction)) {
+  if (Array.isArray(prefetchStrategy)) {
+    prefetchAfterFirstMounted(appsName2Apps(prefetchStrategy as string[]), importEntryOpts);
+  } else if (isFunction(prefetchStrategy)) {
     (async () => {
       // critical rendering apps would be prefetch as earlier as possible
-      const { criticalAppNames = [], minorAppsName = [] } = await prefetchAction(apps);
+      const { criticalAppNames = [], minorAppsName = [] } = await prefetchStrategy(apps);
       prefetchImmediately(appsName2Apps(criticalAppNames), importEntryOpts);
       prefetchAfterFirstMounted(appsName2Apps(minorAppsName), importEntryOpts);
     })();
   } else {
-    switch (prefetchAction) {
+    switch (prefetchStrategy) {
       case true:
         prefetchAfterFirstMounted(apps, importEntryOpts);
         break;

@@ -5,6 +5,10 @@
 
 import { isFunction, snakeCase } from 'lodash';
 
+export function toArray<T>(array: T | T[]): T[] {
+  return Array.isArray(array) ? array : [array];
+}
+
 export function sleep(ms: number) {
   return new Promise(resolve => setTimeout(resolve, ms));
 }
@@ -26,7 +30,7 @@ export function getDefaultTplWrapper(id: string) {
 }
 
 export function getWrapperId(id: string) {
-  return `__qiankun_subapp_wrapper_for_${snakeCase(id)}__`;
+  return `__qiankun_microapp_wrapper_for_${snakeCase(id)}__`;
 }
 
 /** 校验子应用导出的 生命周期 对象是否正确 */

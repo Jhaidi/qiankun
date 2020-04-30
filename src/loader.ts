@@ -7,22 +7,19 @@ import { importEntry } from 'import-html-entry';
 import { concat, mergeWith } from 'lodash';
 import { LifeCycles, ParcelConfigObject } from 'single-spa';
 import getAddOns from './addons';
+import { getMicroAppStateActions } from './globalState';
 import { FrameworkConfiguration, FrameworkLifeCycles, HTMLContentRender, LifeCycleFn, LoadableApp } from './interfaces';
-import { genSandbox } from './sandbox';
-import { Deferred, getDefaultTplWrapper, getWrapperId, validateExportLifecycle } from './utils';
+import { createSandbox } from './sandbox';
+import { Deferred, getDefaultTplWrapper, getWrapperId, toArray, validateExportLifecycle } from './utils';
 
-function assertElementExist(element: Element | null | undefined, id?: string, msg?: string) {
+function assertElementExist(element: Element | null | undefined, msg?: string) {
   if (!element) {
     if (msg) {
       throw new Error(msg);
     }
 
-    throw new Error(`[qiankun] container element with ${id} is not existed!`);
+    throw new Error('[qiankun] element not existed!');
   }
-}
-
-function toArray<T>(array: T | T[]): T[] {
-  return Array.isArray(array) ? array : [array];
 }
 
 function execHooksChain<T extends object>(hooks: Array<LifeCycleFn<T>>, app: LoadableApp<T>): Promise<any> {
@@ -40,16 +37,24 @@ async function validateSingularMode<T extends object>(
   return typeof validate === 'function' ? validate(app) : !!validate;
 }
 
-function createElement(appContent: string, cssIsolation: boolean): HTMLElement {
+// @ts-ignore
+const supportShadowDOM = document.head.attachShadow || document.head.createShadowRoot;
+function createElement(appContent: string, strictStyleIsolation: boolean): HTMLElement {
   const containerElement = document.createElement('div');
   containerElement.innerHTML = appContent;
   // appContent always wrapped with a singular div
   const appElement = containerElement.firstChild as HTMLElement;
-  if (cssIsolation) {
-    const { innerHTML } = appElement;
-    appElement.innerHTML = '';
-    const shadow = appElement.attachShadow({ mode: 'open' });
-    shadow.innerHTML = innerHTML;
+  if (strictStyleIsolation) {
+    if (!supportShadowDOM) {
+      console.warn(
+        '[qiankun]: As current browser not support shadow dom, your strictStyleIsolation configuration will be ignored!',
+      );
+    } else {
+      const { innerHTML } = appElement;
+      appElement.innerHTML = '';
+      const shadow = appElement.attachShadow({ mode: 'open' });
+      shadow.innerHTML = innerHTML;
+    }
   }
 
   return appElement;
@@ -57,24 +62,31 @@ function createElement(appContent: string, cssIsolation: boolean): HTMLElement {
 
 /** generate app wrapper dom getter */
 function getAppWrapperGetter(
+  appName: string,
   appInstanceId: string,
   useLegacyRender: boolean,
-  cssIsolation: boolean,
+  strictStyleIsolation: boolean,
   elementGetter: () => HTMLElement | null,
 ) {
   return () => {
     if (useLegacyRender) {
-      if (cssIsolation) throw new Error('[qiankun]: cssIsolation must not be used with legacyRender');
+      if (strictStyleIsolation) throw new Error('[qiankun]: strictStyleIsolation can not be used with legacy render!');
 
       const appWrapper = document.getElementById(getWrapperId(appInstanceId));
-      assertElementExist(appWrapper, appInstanceId);
+      assertElementExist(
+        appWrapper,
+        `[qiankun] Wrapper element for ${appName} with instance ${appInstanceId} is not existed!`,
+      );
       return appWrapper!;
     }
 
     const element = elementGetter();
-    assertElementExist(element, appInstanceId);
+    assertElementExist(
+      element,
+      `[qiankun] Wrapper element for ${appName} with instance ${appInstanceId} is not existed!`,
+    );
 
-    if (cssIsolation) {
+    if (strictStyleIsolation) {
       return element!.shadowRoot!;
     }
 
@@ -84,17 +96,26 @@ function getAppWrapperGetter(
 
 const rawAppendChild = HTMLElement.prototype.appendChild;
 const rawRemoveChild = HTMLElement.prototype.removeChild;
-type ElementRender = (props: { element: HTMLElement | null; loading: boolean }) => any;
+type ElementRender = (
+  props: { element: HTMLElement | null; loading: boolean },
+  phase: 'loading' | 'mounting' | 'mounted' | 'unmounted',
+) => any;
 
 /**
  * Get the render function
  * If the legacy render function is provide, used as it, otherwise we will insert the app element to target container by qiankun
+ * @param appName
  * @param appContent
  * @param container
  * @param legacyRender
  */
-function getRender(appContent: string, container?: string | HTMLElement, legacyRender?: HTMLContentRender) {
-  const render: ElementRender = ({ element, loading }) => {
+function getRender(
+  appName: string,
+  appContent: string,
+  container?: string | HTMLElement,
+  legacyRender?: HTMLContentRender,
+) {
+  const render: ElementRender = ({ element, loading }, phase) => {
     if (legacyRender) {
       if (process.env.NODE_ENV === 'development') {
         console.warn(
@@ -106,13 +127,27 @@ function getRender(appContent: string, container?: string | HTMLElement, legacyR
     }
 
     const containerElement = typeof container === 'string' ? document.querySelector(container) : container;
-    assertElementExist(
-      containerElement,
-      '',
-      `[qiankun] target container with ${container} not existed while rendering!`,
-    );
 
-    if (!containerElement!.contains(element)) {
+    // The container might have be removed after micro app unmounted.
+    // Such as the micro app unmount lifecycle called by a react componentWillUnmount lifecycle, after micro app unmounted, the react component might also be removed
+    if (phase !== 'unmounted') {
+      const errorMsg = (() => {
+        switch (phase) {
+          case 'loading':
+          case 'mounting':
+            return `[qiankun] Target container with ${container} not existed while ${appName} ${phase}!`;
+
+          case 'mounted':
+            return `[qiankun] Target container with ${container} not existed after ${appName} ${phase}!`;
+
+          default:
+            return `[qiankun] Target container with ${container} not existed while ${appName} rendering!`;
+        }
+      })();
+      assertElementExist(containerElement, errorMsg);
+    }
+
+    if (containerElement && !containerElement.contains(element)) {
       // clear the container
       while (containerElement!.firstChild) {
         rawRemoveChild.call(containerElement, containerElement!.firstChild);
@@ -130,8 +165,27 @@ function getRender(appContent: string, container?: string | HTMLElement, legacyR
   return render;
 }
 
-const appExportPromiseCaches: Record<string, Promise<LifeCycles>> = {};
-const appInstanceCounts: Record<string, number> = {};
+function getLifecyclesFromExports(scriptExports: LifeCycles<any>, appName: string, global: WindowProxy) {
+  if (validateExportLifecycle(scriptExports)) {
+    return scriptExports;
+  }
+
+  if (process.env.NODE_ENV === 'development') {
+    console.warn(
+      `[qiankun] lifecycle not found from ${appName} entry exports, fallback to get from window['${appName}']`,
+    );
+  }
+
+  // fallback to global variable who named with ${appName} while module exports not found
+  const globalVariableExports = (global as any)[appName];
+
+  if (validateExportLifecycle(globalVariableExports)) {
+    return globalVariableExports;
+  }
+
+  throw new Error(`[qiankun] You need to export lifecycle functions in ${appName} entry`);
+}
+
 let prevAppUnmountedDeferred: Deferred<void>;
 
 export async function loadApp<T extends object>(
@@ -139,8 +193,8 @@ export async function loadApp<T extends object>(
   configuration: FrameworkConfiguration = {},
   lifeCycles?: FrameworkLifeCycles<T>,
 ): Promise<ParcelConfigObject> {
-  const { entry, name: appName, render: legacyRender, container } = app;
-  const { singular = true, jsSandbox = true, cssIsolation = false, ...importEntryOpts } = configuration;
+  const { entry, name: appName } = app;
+  const { singular = false, sandbox = true, ...importEntryOpts } = configuration;
 
   // get the entry html content and script executor
   const { template, execScripts, assetPublicPath } = await importEntry(entry, importEntryOpts);
@@ -152,30 +206,39 @@ export async function loadApp<T extends object>(
     await (prevAppUnmountedDeferred && prevAppUnmountedDeferred.promise);
   }
 
-  const appInstanceId = `${appName}_${
-    appInstanceCounts.hasOwnProperty(appName) ? (appInstanceCounts[appName] ?? 0) + 1 : 0
-  }`;
+  const appInstanceId = `${appName}_${+new Date()}`;
+
+  const strictStyleIsolation = typeof sandbox === 'object' && !!sandbox.strictStyleIsolation;
 
   const appContent = getDefaultTplWrapper(appInstanceId)(template);
-  let element: HTMLElement | null = createElement(appContent, cssIsolation);
+  let element: HTMLElement | null = createElement(appContent, strictStyleIsolation);
 
-  const render = getRender(appContent, container, legacyRender);
+  const container = 'container' in app ? app.container : undefined;
+  const legacyRender = 'render' in app ? app.render : undefined;
+
+  const render = getRender(appName, appContent, container, legacyRender);
 
   // 第一次加载设置应用可见区域 dom 结构
   // 确保每次应用加载前容器 dom 结构已经设置完毕
-  render({ element, loading: true });
+  render({ element, loading: true }, 'loading');
 
-  const containerGetter = getAppWrapperGetter(appInstanceId, !!legacyRender, cssIsolation, () => element);
+  const containerGetter = getAppWrapperGetter(
+    appName,
+    appInstanceId,
+    !!legacyRender,
+    strictStyleIsolation,
+    () => element,
+  );
 
   let global: Window = window;
   let mountSandbox = () => Promise.resolve();
   let unmountSandbox = () => Promise.resolve();
-  if (jsSandbox) {
-    const sandbox = genSandbox(appName, containerGetter, Boolean(singular));
+  if (sandbox) {
+    const sandboxInstance = createSandbox(appName, containerGetter, Boolean(singular));
     // 用沙箱的代理对象作为接下来使用的全局对象
-    global = sandbox.sandbox;
-    mountSandbox = sandbox.mount;
-    unmountSandbox = sandbox.unmount;
+    global = sandboxInstance.proxy;
+    mountSandbox = sandboxInstance.mount;
+    unmountSandbox = sandboxInstance.unmount;
   }
 
   const { beforeUnmount = [], afterUnmount = [], afterMount = [], beforeMount = [], beforeLoad = [] } = mergeWith(
@@ -187,50 +250,19 @@ export async function loadApp<T extends object>(
 
   await execHooksChain(toArray(beforeLoad), app);
 
-  // cache the execScripts returned promise
-  if (!appExportPromiseCaches[appName]) {
-    appExportPromiseCaches[appName] = execScripts(global, !singular);
-  }
-
   // get the lifecycle hooks from module exports
-  const scriptExports: any = await appExportPromiseCaches[appName];
-  let bootstrap;
-  let mount: any;
-  let unmount: any;
+  const scriptExports: any = await execScripts(global, !singular);
+  const { bootstrap, mount, unmount, update } = getLifecyclesFromExports(scriptExports, appName, global);
 
-  if (validateExportLifecycle(scriptExports)) {
-    // eslint-disable-next-line prefer-destructuring
-    bootstrap = scriptExports.bootstrap;
-    // eslint-disable-next-line prefer-destructuring
-    mount = scriptExports.mount;
-    // eslint-disable-next-line prefer-destructuring
-    unmount = scriptExports.unmount;
-  } else {
-    if (process.env.NODE_ENV === 'development') {
-      console.warn(
-        `[qiankun] lifecycle not found from ${appName} entry exports, fallback to get from window['${appName}']`,
-      );
-    }
+  const {
+    onGlobalStateChange,
+    setGlobalState,
+    offGlobalStateChange,
+  }: Record<string, Function> = getMicroAppStateActions(appInstanceId);
 
-    // fallback to global variable who named with ${appName} while module exports not found
-    const globalVariableExports = (global as any)[appName];
-
-    if (validateExportLifecycle(globalVariableExports)) {
-      // eslint-disable-next-line prefer-destructuring
-      bootstrap = globalVariableExports.bootstrap;
-      // eslint-disable-next-line prefer-destructuring
-      mount = globalVariableExports.mount;
-      // eslint-disable-next-line prefer-destructuring
-      unmount = globalVariableExports.unmount;
-    } else {
-      delete appExportPromiseCaches[appName];
-      throw new Error(`[qiankun] You need to export lifecycle functions in ${appName} entry`);
-    }
-  }
-
-  return {
+  const parcelConfig: ParcelConfigObject = {
     name: appInstanceId,
-    bootstrap: [bootstrap],
+    bootstrap,
     mount: [
       async () => {
         if ((await validateSingularMode(singular, app)) && prevAppUnmountedDeferred) {
@@ -242,15 +274,15 @@ export async function loadApp<T extends object>(
       // 添加 mount hook, 确保每次应用加载前容器 dom 结构已经设置完毕
       async () => {
         // element would be destroyed after unmounted, we need to recreate it if it not exist
-        element = element || createElement(appContent, cssIsolation);
-        render({ element, loading: true });
+        element = element || createElement(appContent, strictStyleIsolation);
+        render({ element, loading: true }, 'mounting');
       },
       // exec the chain after rendering to keep the behavior with beforeLoad
       async () => execHooksChain(toArray(beforeMount), app),
       mountSandbox,
-      async props => mount({ ...props, container: containerGetter() }),
+      async props => mount({ ...props, container: containerGetter(), setGlobalState, onGlobalStateChange }),
       // 应用 mount 完成后结束 loading
-      async () => render({ element, loading: false }),
+      async () => render({ element, loading: false }, 'mounted'),
       async () => execHooksChain(toArray(afterMount), app),
       // initialize the unmount defer after app mounted and resolve the defer after it unmounted
       async () => {
@@ -265,7 +297,8 @@ export async function loadApp<T extends object>(
       unmountSandbox,
       async () => execHooksChain(toArray(afterUnmount), app),
       async () => {
-        render({ element: null, loading: false });
+        render({ element: null, loading: false }, 'unmounted');
+        offGlobalStateChange(appInstanceId);
         // for gc
         element = null;
       },
@@ -276,4 +309,10 @@ export async function loadApp<T extends object>(
       },
     ],
   };
+
+  if (typeof update === 'function') {
+    parcelConfig.update = update;
+  }
+
+  return parcelConfig;
 }

@@ -16,14 +16,21 @@ export async function bootstrap() {
 
 export async function mount(props) {
   console.log('[react15] props from main framework', props);
-  ReactDOM.render(<App />, document.getElementById('react15Root'));
+  const { container } = props;
+  ReactDOM.render(
+    <App />,
+    container ? container.querySelector('#react15Root') : document.getElementById('react15Root'),
+  );
   import('./dynamic.css').then(() => {
     console.log('[react15] dynamic style load');
   });
 }
 
-export async function unmount() {
-  ReactDOM.unmountComponentAtNode(document.getElementById('react15Root'));
+export async function unmount(props) {
+  const { container } = props;
+  ReactDOM.unmountComponentAtNode(
+    container ? container.querySelector('#react15Root') : document.getElementById('react15Root'),
+  );
 }
 
 if (!window.__POWERED_BY_QIANKUN__) {
